@@ -1,0 +1,7 @@
+build/
+install/
+log/
+.vscode/
+*.mp4
+*.avi
+*.jpg
