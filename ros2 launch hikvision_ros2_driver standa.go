@@ -1,1 +1,5 @@
 ros2 launch hikvision_ros2_driver standalone.launch.yaml camera_name:=argus_camera
+// 调相机参数 f= 60cm
+ros2 run rqt_reconfigure rqt_reconfigure
+
+///home/styh/argus_ws/src/hikvision_ros2_driver/hikvision_ros2_driver/src/hikvision_ros2_driver.cpp 永久调整

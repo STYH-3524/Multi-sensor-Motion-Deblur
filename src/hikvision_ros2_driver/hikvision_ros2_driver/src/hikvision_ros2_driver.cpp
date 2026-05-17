@@ -28,6 +28,9 @@ struct HikvisionDriver::Impl {
     image_transport::Publisher img_pub;
     std::shared_ptr<rclcpp::Publisher<HikImageInfo>> p_info_pub;
     static void image_callback_ex(unsigned char *pData, MV_FRAME_OUT_INFO_EX *pFrameInfo, void *pUser);
+    
+    // 新增：用于维持动态参数回调生命周期的句柄
+    rclcpp::Node::OnSetParametersCallbackHandle::SharedPtr param_callback_handle;
 };
 
 void HikvisionDriver::Impl::image_callback_ex(unsigned char *pData, MV_FRAME_OUT_INFO_EX *pFrameInfo, void *pUser) {
@@ -104,6 +107,10 @@ HikvisionDriver::HikvisionDriver(const rclcpp::NodeOptions &options)
     pImpl->camera_name = get_parameter("camera_name").as_string();
     RCLCPP_INFO(logger, "trying to open camera: '%s'", pImpl->camera_name.c_str());
 
+    // 新增：声明曝光和增益的动态参数（默认值：20000us 曝光，15dB 增益）
+    declare_parameter<double>("exposure_time", 20000.0);
+    declare_parameter<double>("gain", 15.0);
+
     rclcpp::QoS qos(1);
     pImpl->img_pub = image_transport::create_publisher(this, "raw/image", qos.get_rmw_qos_profile());
     pImpl->p_info_pub = create_publisher<HikImageInfo>("info", qos);
@@ -137,6 +144,47 @@ HikvisionDriver::HikvisionDriver(const rclcpp::NodeOptions &options)
         if (pUserDefinedName == pImpl->camera_name) {
             MV_CHECK(logger, MV_CC_CreateHandle, &pImpl->handle, pDeviceInfo);
             MV_CHECK(logger, MV_CC_OpenDevice, pImpl->handle);
+            // 强行将相机的物理输出格式改为 RGB8 彩色
+            MV_CHECK(logger, MV_CC_SetEnumValue, pImpl->handle, "PixelFormat", PixelType_Gvsp_RGB8_Packed);
+
+            // 初始化相机参数
+            double init_exposure = get_parameter("exposure_time").as_double();
+            double init_gain = get_parameter("gain").as_double();
+            MV_CHECK(logger, MV_CC_SetEnumValue, pImpl->handle, "ExposureAuto", 0); // 关闭自动曝光
+            MV_CHECK(logger, MV_CC_SetFloatValue, pImpl->handle, "ExposureTime", static_cast<float>(init_exposure));
+            MV_CHECK(logger, MV_CC_SetFloatValue, pImpl->handle, "Gain", static_cast<float>(init_gain));
+            MV_CHECK(logger, MV_CC_SetEnumValue, pImpl->handle, "BalanceWhiteAuto", 2); // 自动白平衡
+
+            // 新增：注册动态参数监听回调（实现实时滑块控制）
+            pImpl->param_callback_handle = this->add_on_set_parameters_callback(
+                [this, logger](const std::vector<rclcpp::Parameter> &parameters) {
+                    rcl_interfaces::msg::SetParametersResult result;
+                    result.successful = true;
+                    for (const auto &param : parameters) {
+                        if (param.get_name() == "exposure_time") {
+                            float val = static_cast<float>(param.as_double());
+                            int ret = MV_CC_SetFloatValue(pImpl->handle, "ExposureTime", val);
+                            if (ret == MV_OK) {
+                                RCLCPP_INFO(logger, "Dynamically set ExposureTime to: %.1f us", val);
+                            } else {
+                                result.successful = false;
+                                result.reason = "Failed to set ExposureTime via SDK";
+                            }
+                        } else if (param.get_name() == "gain") {
+                            float val = static_cast<float>(param.as_double());
+                            int ret = MV_CC_SetFloatValue(pImpl->handle, "Gain", val);
+                            if (ret == MV_OK) {
+                                RCLCPP_INFO(logger, "Dynamically set Gain to: %.1f dB", val);
+                            } else {
+                                result.successful = false;
+                                result.reason = "Failed to set Gain via SDK";
+                            }
+                        }
+                    }
+                    return result;
+                }
+            );
+
             MV_CHECK(logger, MV_CC_RegisterImageCallBackEx, pImpl->handle, &HikvisionDriver::Impl::image_callback_ex,
                      this);
             MV_CHECK(logger, MV_CC_StartGrabbing, pImpl->handle);
